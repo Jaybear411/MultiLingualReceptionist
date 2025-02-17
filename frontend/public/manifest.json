@@ -1,0 +1,8 @@
+{
+  "short_name": "AI Receptionist",
+  "name": "Multilingual AI Receptionist",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff"
+}
