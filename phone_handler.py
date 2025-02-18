@@ -13,18 +13,21 @@ logger = logging.getLogger(__name__)
 # Initialize AI handler
 ai_handler = AIHandler()
 
+NGROK_URL = os.getenv('NGROK_URL', 'https://56ec-171-66-13-202.ngrok-free.app')
+
 def handle_incoming_call():
     """Handle initial incoming call"""
     try:
         logger.info("Handling incoming call")
         response = VoiceResponse()
         
-        # Start recording the call
+        # Start recording
         response.record(
             action='/webhook/recording-complete',
             recordingStatusCallback='/webhook/recording-status',
-            recordingStatusCallbackEvent=['completed'],
-            trim='trim-silence'
+            recordingStatusCallbackEvent=['in-progress', 'completed'],
+            trim='trim-silence',
+            maxLength=3600  # 1 hour max
         )
         
         # Initial greeting
@@ -33,40 +36,113 @@ def handle_incoming_call():
             voice='alice'
         )
         
-        # Gather speech input
-        gather = Gather(
-            input='speech',
-            action='/webhook/speech',
-            language='en-US',
-            speechTimeout='auto',
-            enhanced=True  # Enable enhanced speech recognition
-        )
-        response.append(gather)
+        # Add speech gathering
+        add_speech_gathering(response)
         
-        # If no input received
-        response.say("I didn't catch that. Please try again.", voice='alice')
-        
-        logger.debug("Generated initial response for incoming call")
+        logger.debug(f"Generated initial response for incoming call: {str(response)}")
         return str(response)
     except Exception as e:
-        logger.error(f"Error handling incoming call: {str(e)}")
-        raise
+        logger.exception("Error handling incoming call")
+        response = VoiceResponse()
+        response.say("I apologize, but I'm having trouble. Please try calling back later.", voice='alice')
+        response.hangup()
+        return str(response)
 
 def handle_speech(call_sid, speech_result):
     """Process speech from the caller and generate AI response"""
     try:
         logger.info(f"Processing speech for call {call_sid}: {speech_result}")
         
-        if not speech_result:
-            return generate_response("I'm sorry, I didn't catch that. Could you please repeat?")
-            
-        # Process speech with AI
-        ai_response = ai_handler.process_speech(call_sid, speech_result)
+        # Create base response
+        response = VoiceResponse()
         
-        return generate_response(ai_response)
+        if not speech_result:
+            logger.info("No speech result received")
+            response.say("I'm sorry, I didn't catch that. Could you please repeat?", voice='alice')
+            add_speech_gathering(response)
+            return str(response)
+            
+        try:
+            # Process speech with AI
+            ai_response = ai_handler.process_speech(call_sid, speech_result)
+            logger.info(f"AI response: {ai_response}")
+            
+            # Say the AI response
+            response.say(ai_response, voice='alice')
+        except Exception as ai_error:
+            logger.exception("Error processing with AI")
+            response.say("I apologize, but I'm having trouble understanding. Let me try again.", voice='alice')
+        
+        # Always add speech gathering for next input
+        add_speech_gathering(response)
+        
+        return str(response)
+        
     except Exception as e:
-        logger.error(f"Error processing speech: {str(e)}")
-        return generate_response("I apologize, but I'm having trouble understanding. Could you please try again?")
+        logger.exception(f"Error in handle_speech: {str(e)}")
+        # Create error response
+        response = VoiceResponse()
+        response.say("I encountered an error. Let me try again.", voice='alice')
+        add_speech_gathering(response)
+        return str(response)
+
+def add_speech_gathering(response):
+    """Add speech gathering to a response"""
+    try:
+        gather = Gather(
+            input='speech',
+            action=f'{NGROK_URL}/webhook/speech',
+            method='POST',
+            language='en-US',
+            speechTimeout='auto',
+            enhanced=True
+        )
+        gather.say("How can I help you?", voice='alice')
+        response.append(gather)
+        
+        # Add redirect in case no input is received
+        response.redirect(f'{NGROK_URL}/webhook/speech', method='POST')
+    except Exception as e:
+        logger.exception("Error adding speech gathering")
+        response.say("I'm having trouble. Please try calling back later.", voice='alice')
+        response.hangup()
+
+def handle_recording_complete(call_sid, recording_url):
+    """Handle completed recording"""
+    try:
+        logger.info(f"Call recording completed for {call_sid}: {recording_url}")
+        return True
+    except Exception as e:
+        logger.exception(f"Error handling recording: {str(e)}")
+        return False
+
+def get_call_transcript(call_sid):
+    """Get the transcript of the conversation"""
+    try:
+        conversation = ai_handler.get_conversation_history(call_sid)
+        
+        # Format conversation for display
+        transcript = []
+        for msg in conversation:
+            if msg['role'] not in ['system']:
+                transcript.append({
+                    'type': 'user' if msg['role'] == 'user' else 'ai',
+                    'text': msg['content']
+                })
+        
+        return transcript
+    except Exception as e:
+        logger.exception(f"Error getting transcript: {str(e)}")
+        return []
+
+def clear_call_data(call_sid):
+    """Clean up call data when call ends"""
+    try:
+        ai_handler.clear_conversation(call_sid)
+        return True
+    except Exception as e:
+        logger.exception(f"Error clearing call data: {str(e)}")
+        return False
 
 def generate_response(message, gather_speech=True):
     """Generate TwiML response with optional speech gathering"""
@@ -88,47 +164,4 @@ def generate_response(message, gather_speech=True):
         return str(response)
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
-        raise
-
-def handle_recording_complete(call_sid, recording_url):
-    """Handle completed call recording"""
-    try:
-        logger.info(f"Call recording completed for {call_sid}: {recording_url}")
-        
-        # Here you would typically:
-        # 1. Download the recording
-        # 2. Store it in your database/storage
-        # 3. Process it for analysis
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error handling recording: {str(e)}")
-        raise
-
-def get_call_transcript(call_sid):
-    """Get the transcript of the conversation"""
-    try:
-        conversation = ai_handler.get_conversation_history(call_sid)
-        
-        # Format conversation for display
-        transcript = []
-        for msg in conversation:
-            if msg['role'] not in ['system']:
-                transcript.append({
-                    'type': 'user' if msg['role'] == 'user' else 'ai',
-                    'text': msg['content']
-                })
-        
-        return transcript
-    except Exception as e:
-        logger.error(f"Error getting transcript: {str(e)}")
-        raise
-
-def clear_call_data(call_sid):
-    """Clean up call data when call ends"""
-    try:
-        ai_handler.clear_conversation(call_sid)
-        return True
-    except Exception as e:
-        logger.error(f"Error clearing call data: {str(e)}")
         raise

@@ -4,7 +4,10 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 import logging
+from twilio.twiml.voice_response import VoiceResponse, Gather
 from call_service import CallService
+from phone_handler import handle_incoming_call, handle_speech, handle_recording_complete, get_call_transcript, clear_call_data, generate_response
+from ai_handler import AIHandler
 
 # Set up logging
 logging.basicConfig(
@@ -17,328 +20,205 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Enable CORS for all domains in debug mode
-CORS(app, resources={
-    r"/api/*": {
-        "origins": "*",  # Allow all origins in debug mode
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
-
-# Configure app
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+# Configure CORS to allow all origins
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize services
 call_service = CallService()
+ai_handler = AIHandler()
 
-# In-memory storage for active calls (temporary solution)
+# In-memory storage
 active_calls = []
 incoming_calls = []
 
-@app.route('/api/test', methods=['GET'])
-def test_endpoint():
-    """Test endpoint to verify API is working"""
+@app.route('/healthcheck', methods=['GET'])
+def healthcheck():
+    """Health check endpoint"""
+    logger.info("Health check endpoint hit")
     return jsonify({
         'status': 'success',
-        'message': 'API is working',
-        'timestamp': datetime.utcnow().isoformat()
+        'message': 'Server is running'
     })
 
-@app.route('/api/speech-to-text', methods=['POST'])
-def speech_to_text():
-    # Temporary placeholder response
-    return jsonify({
-        'text': 'Speech-to-text functionality coming soon'
-    })
+@app.route('/', methods=['GET', 'POST'])
+def root():
+    """Root endpoint for speech processing"""
+    try:
+        print("="*50)
+        print("🎯 ROOT ENDPOINT HIT")
+        print(f"📝 Method: {request.method}")
+        print(f"🔑 Headers: {dict(request.headers)}")
+        print(f"📦 Values: {dict(request.values)}")
+        print("="*50)
+        
+        if request.method == 'GET':
+            print("✅ Handling GET request")
+            return jsonify({
+                'status': 'success',
+                'message': 'Server is running'
+            })
+        
+        # Handle POST request (speech webhook)
+        print("🎤 Starting speech processing")
+        response = VoiceResponse()
+        
+        # Get speech result
+        speech_result = request.values.get('SpeechResult')
+        call_sid = request.values.get('CallSid')
+        
+        print(f"📞 Call SID: {call_sid}")
+        print(f"🗣️ Speech Result: {speech_result}")
+        
+        try:
+            if speech_result:
+                print("🤖 Processing speech with AI")
+                # Process with AI
+                ai_response = ai_handler.process_speech(call_sid, speech_result)
+                print(f"🤖 AI Response: {ai_response}")
+                
+                # Say the AI response
+                response.say(ai_response, voice='alice')
+                print("🔊 Added AI response to TwiML")
+            else:
+                print("⚠️ No speech result received")
+                response.say("I apologize, but I didn't catch that. Could you please repeat what you said?", voice='alice')
+            
+            # Create absolute URLs for webhooks
+            speech_url = f"{os.getenv('NGROK_URL')}/"
+            print(f"🌐 Using webhook URL: {speech_url}")
+            
+            # Add new gather
+            gather = Gather(
+                input='speech',
+                action=speech_url,
+                method='POST',
+                language='en-US',
+                speechTimeout='auto',
+                enhanced=True
+            )
+            response.append(gather)
+            print("🎤 Added gather for next speech input")
+            
+            # Add redirect for no input
+            response.redirect(speech_url, method='POST')
+            print("↩️ Added redirect for no input")
+            
+            response_str = str(response)
+            print("📤 Final TwiML response:")
+            print(response_str)
+            print("="*50)
+            return response_str
+            
+        except Exception as e:
+            print("❌ Error in speech processing:")
+            print(f"💥 Error type: {type(e).__name__}")
+            print(f"💥 Error message: {str(e)}")
+            print(f"💥 Error details:", exc_info=True)
+            
+            response.say("I apologize for the difficulty. Let me know how I can help you.", voice='alice')
+            
+            # Create absolute URLs for webhooks
+            speech_url = f"{os.getenv('NGROK_URL')}/"
+            print(f"🌐 Using webhook URL for error recovery: {speech_url}")
+            
+            # Add new gather even after error
+            gather = Gather(
+                input='speech',
+                action=speech_url,
+                method='POST',
+                language='en-US',
+                speechTimeout='auto',
+                enhanced=True
+            )
+            response.append(gather)
+            print("🎤 Added gather for retry")
+            
+            # Add redirect for no input
+            response.redirect(speech_url, method='POST')
+            print("↩️ Added redirect for no input")
+            
+            response_str = str(response)
+            print("📤 Error recovery TwiML response:")
+            print(response_str)
+            print("="*50)
+            return response_str
+            
+    except Exception as e:
+        print("💥 CRITICAL ERROR in root endpoint:")
+        print(f"💥 Error type: {type(e).__name__}")
+        print(f"💥 Error message: {str(e)}")
+        print(f"💥 Error details:", exc_info=True)
+        
+        response = VoiceResponse()
+        response.say("I apologize, but we're experiencing technical difficulties. Please try calling back in a few minutes.", voice='alice')
+        response.hangup()
+        
+        response_str = str(response)
+        print("📤 Critical error TwiML response:")
+        print(response_str)
+        print("="*50)
+        return response_str
 
-@app.route('/api/text-to-speech', methods=['POST'])
-def text_to_speech():
-    # Temporary placeholder response
-    return jsonify({
-        'audio': 'Text-to-speech functionality coming soon'
-    })
+@app.route('/status', methods=['POST'])
+def status():
+    """Handle call status updates"""
+    try:
+        logger.info("=== Received status webhook ===")
+        logger.info(f"Request method: {request.method}")
+        logger.info(f"Request headers: {dict(request.headers)}")
+        logger.info(f"Request values: {dict(request.values)}")
+        return '', 200
+    except Exception as e:
+        logger.exception("Error in status webhook")
+        return '', 200
+
+# API endpoints
+@app.route('/api/active-calls', methods=['GET'])
+def get_active_calls():
+    """Get list of active calls"""
+    try:
+        return jsonify(active_calls if active_calls else [])
+    except Exception as e:
+        logger.exception("Error in get_active_calls endpoint")
+        return jsonify([])
 
 @app.route('/api/make-call', methods=['POST'])
 def make_call():
     """Initiate an outbound call"""
     try:
-        logger.debug("Received make-call request")
-        logger.debug(f"Request headers: {dict(request.headers)}")
-        logger.debug(f"Request data: {request.get_data(as_text=True)}")
-        
-        if not request.is_json:
-            logger.error("Request is not JSON")
-            return jsonify({
-                'status': 'error',
-                'message': 'Request must be JSON'
-            }), 400
-            
         data = request.json
-        logger.debug(f"Parsed JSON data: {data}")
-        
         to_number = data.get('phone_number')
         message = data.get('message')
         
         if not to_number:
-            logger.error("No phone number provided")
             return jsonify({
                 'status': 'error',
                 'message': 'Phone number is required'
             }), 400
             
-        logger.info(f"Making call to {to_number}")
         result = call_service.make_call(to_number, message)
-        logger.debug(f"Call result: {result}")
         
         if result['status'] == 'success':
-            # Store call info in memory
             active_calls.append({
                 'call_sid': result['call_sid'],
                 'to_number': to_number,
-                'from_number': os.getenv('TWILIO_PHONE_NUMBER'),
                 'status': 'initiated',
-                'start_time': datetime.utcnow().isoformat(),
-                'duration': 0
+                'duration': 0,
+                'timestamp': datetime.utcnow().isoformat()
             })
             
         return jsonify(result)
+        
     except Exception as e:
-        logger.exception("Error in make_call endpoint")
+        logger.exception("Error making call")
         return jsonify({
             'status': 'error',
-            'message': f'Server error: {str(e)}'
-        }), 500
-
-@app.route('/api/active-calls', methods=['GET'])
-def get_active_calls():
-    """Get list of active calls"""
-    try:
-        return jsonify([
-            call for call in active_calls 
-            if call['status'] in ['initiated', 'ringing', 'in-progress']
-        ])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/call-status', methods=['POST'])
-def call_status():
-    """Handle call status callbacks from Twilio"""
-    try:
-        call_sid = request.values.get('CallSid')
-        call_status = request.values.get('CallStatus')
-        duration = request.values.get('CallDuration', 0)
-        
-        # Update call status in memory
-        for call in active_calls:
-            if call['call_sid'] == call_sid:
-                call['status'] = call_status
-                call['duration'] = duration
-                if call_status in ['completed', 'failed', 'busy', 'no-answer', 'canceled']:
-                    call['end_time'] = datetime.utcnow().isoformat()
-                break
-        
-        return '', 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/end-call', methods=['POST'])
-def end_call():
-    """End an active call"""
-    try:
-        data = request.json
-        call_sid = data.get('call_sid')
-        
-        if not call_sid:
-            return jsonify({'error': 'Call SID is required'}), 400
-            
-        result = call_service.end_call(call_sid)
-        
-        # Update call status in memory
-        for call in active_calls:
-            if call['call_sid'] == call_sid:
-                call['status'] = 'completed'
-                call['end_time'] = datetime.utcnow().isoformat()
-                break
-                
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/incoming-calls', methods=['GET'])
-def get_incoming_calls():
-    """Get list of incoming calls"""
-    try:
-        return jsonify([
-            call for call in incoming_calls 
-            if call['status'] in ['ringing', 'queued']
-        ])
-    except Exception as e:
-        logger.exception("Error in get_incoming_calls endpoint")
-        return jsonify({
-            'status': 'error',
-            'message': f'Server error: {str(e)}'
-        }), 500
-
-@app.route('/webhook/incoming-call', methods=['POST'])
-def incoming_call_webhook():
-    """Handle incoming call webhook from Twilio"""
-    try:
-        call_sid = request.values.get('CallSid')
-        from_number = request.values.get('From')
-        
-        # Store incoming call
-        incoming_calls.append({
-            'call_sid': call_sid,
-            'from_number': from_number,
-            'status': 'ringing',
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        return handle_incoming_call()
-    except Exception as e:
-        logger.exception("Error in incoming_call_webhook endpoint")
-        return jsonify({
-            'status': 'error',
-            'message': f'Server error: {str(e)}'
-        }), 500
-
-@app.route('/api/answer-call', methods=['POST'])
-def answer_call():
-    """Answer an incoming call"""
-    try:
-        data = request.json
-        call_sid = data.get('call_sid')
-        
-        if not call_sid:
-            return jsonify({
-                'status': 'error',
-                'message': 'Call SID is required'
-            }), 400
-            
-        # Find the call
-        call = next((call for call in incoming_calls if call['call_sid'] == call_sid), None)
-        if not call:
-            return jsonify({
-                'status': 'error',
-                'message': 'Call not found'
-            }), 404
-            
-        # Update call status
-        call['status'] = 'in-progress'
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Call answered successfully'
-        })
-    except Exception as e:
-        logger.exception("Error in answer_call endpoint")
-        return jsonify({
-            'status': 'error',
-            'message': f'Server error: {str(e)}'
-        }), 500
-
-@app.route('/api/respond-to-call', methods=['POST'])
-def respond_to_call():
-    """Send a response to an active call"""
-    try:
-        data = request.json
-        call_sid = data.get('call_sid')
-        message = data.get('message')
-        
-        if not call_sid or not message:
-            return jsonify({
-                'status': 'error',
-                'message': 'Call SID and message are required'
-            }), 400
-            
-        # Generate TwiML response
-        twiml = handle_call_response(message)
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Response sent successfully'
-        })
-    except Exception as e:
-        logger.exception("Error in respond_to_call endpoint")
-        return jsonify({
-            'status': 'error',
-            'message': f'Server error: {str(e)}'
-        }), 500
-
-@app.route('/webhook/speech', methods=['POST'])
-def speech_webhook():
-    """Handle speech input from Twilio"""
-    try:
-        call_sid = request.values.get('CallSid')
-        speech_result = request.values.get('SpeechResult')
-        
-        logger.info(f"Received speech from {call_sid}: {speech_result}")
-        
-        # Process speech and get AI response
-        response = handle_speech(call_sid, speech_result)
-        
-        return response
-    except Exception as e:
-        logger.exception("Error in speech webhook")
-        return generate_response("I apologize, but I'm having trouble. Please try again.")
-
-@app.route('/webhook/recording-complete', methods=['POST'])
-def recording_complete():
-    """Handle completed recording"""
-    try:
-        call_sid = request.values.get('CallSid')
-        recording_url = request.values.get('RecordingUrl')
-        
-        # Process the recording
-        handle_recording_complete(call_sid, recording_url)
-        
-        return '', 200
-    except Exception as e:
-        logger.exception("Error in recording complete webhook")
-        return '', 500
-
-@app.route('/webhook/recording-status', methods=['POST'])
-def recording_status():
-    """Handle recording status updates"""
-    try:
-        call_sid = request.values.get('CallSid')
-        status = request.values.get('RecordingStatus')
-        
-        logger.info(f"Recording status for {call_sid}: {status}")
-        
-        return '', 200
-    except Exception as e:
-        logger.exception("Error in recording status webhook")
-        return '', 500
-
-@app.route('/api/call-transcript', methods=['GET'])
-def get_transcript():
-    """Get transcript for a call"""
-    try:
-        call_sid = request.args.get('call_sid')
-        
-        if not call_sid:
-            return jsonify({
-                'status': 'error',
-                'message': 'Call SID is required'
-            }), 400
-            
-        transcript = get_call_transcript(call_sid)
-        
-        return jsonify({
-            'status': 'success',
-            'transcript': transcript
-        })
-    except Exception as e:
-        logger.exception("Error getting transcript")
-        return jsonify({
-            'status': 'error',
-            'message': f'Server error: {str(e)}'
+            'message': str(e)
         }), 500
 
 if __name__ == '__main__':
     logger.info("Starting Flask server...")
-    logger.debug(f"TWILIO_ACCOUNT_SID: {os.getenv('TWILIO_ACCOUNT_SID')[:5]}...")  # Only log first 5 chars
+    logger.info("Server will be available at http://0.0.0.0:5001")
+    logger.debug(f"TWILIO_ACCOUNT_SID: {os.getenv('TWILIO_ACCOUNT_SID')[:5]}...")
     logger.debug(f"TWILIO_PHONE_NUMBER: {os.getenv('TWILIO_PHONE_NUMBER')}")
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)
